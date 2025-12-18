@@ -32,6 +32,49 @@ contract DSCEngineTest is Test {
     }
 
     //////////////////////////////
+    // Constructor Tests /////////
+    //////////////////////////////
+    address[] public tokenAddresses = new address[](0);
+    address[] public priceFeedAddresses = new address[](0);
+
+    function testRevertsIfTokenLengthDoesntMatchPriceFeeds() public {
+        tokenAddresses.push(weth);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        priceFeedAddresses.push(btcUsdPriceFeed);
+
+        vm.expectRevert(DSCEngine.DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testRevertIfDSCAddressIsZero() public {
+        vm.expectRevert(DSCEngine.DSCEngine__ZeroAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(0));
+    }
+    
+    function testRevertIfTokenAddressIsZero() public {
+        tokenAddresses.push(address(0));
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidTokenAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testRevertIfPriceFeedAddressIsZero() public {
+        tokenAddresses.push(weth);
+        priceFeedAddresses.push(address(0));
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidPriceFeedAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testRevertIfTokenAddressIsDuplicate() public {
+        tokenAddresses.push(weth);
+        tokenAddresses.push(weth);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        vm.expectRevert(DSCEngine.DSCEngine__DuplicateToken.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    //////////////////////////////
     // Price Tests ///////////////
     //////////////////////////////
 
@@ -42,8 +85,15 @@ contract DSCEngineTest is Test {
         assertEq(actualUsd, expectedUsd);
     }
 
+    function testGetTokenAmountFromUsd() public {
+        uint256 usd = 45000e18;
+        uint256 expectedTokenAmount = 15 ether;
+        uint256 actualTokenAmount = engine.getTokenAmountFromUsd(weth, usd);
+        assertEq(actualTokenAmount, expectedTokenAmount);
+    }
+ 
     //////////////////////////////
-    // Price Tests ///////////////
+    // depositCollateral Tests ///
     //////////////////////////////
 
     function testRevertIfCollateralZero() public {
@@ -53,4 +103,32 @@ contract DSCEngineTest is Test {
         engine.depositCollateral(weth, 0);
         vm.stopPrank();
     }
+
+    function testRevertIfCollateralIsNotAllowed() public {
+        ERC20Mock randomToken = new ERC20Mock("RANDOM", "RANDOM", USER, 100 ether);
+        vm.startPrank(USER);
+        ERC20Mock(randomToken).approve(address(engine), AMOUNT_COLLATERAL);
+        vm.expectRevert(DSCEngine.DSCEngine__NotAllowedToken.selector);
+        engine.depositCollateral(address(randomToken), AMOUNT_COLLATERAL);
+        vm.stopPrank();
+    }
+
+    modifier depositedCollateral() {
+        vm.startPrank(USER);
+        ERC20Mock(weth).approve(address(engine), AMOUNT_COLLATERAL);
+        engine.depositCollateral(weth, AMOUNT_COLLATERAL);
+        vm.stopPrank();
+        _;
+    }
+
+    function testCanDepositCollateralAndGetAccountInfo() public depositedCollateral {
+        (uint256 totalCollateralValueInUsd, uint256 totalDscMinted) = engine.getAccountInfo(USER);
+        uint256 expectedTotalDscMinted = 0;
+        uint256 expectedDepositedAmount = engine.getTokenAmountFromUsd(weth, totalCollateralValueInUsd);
+        assertEq(AMOUNT_COLLATERAL, expectedDepositedAmount);
+        assertEq(totalDscMinted, expectedTotalDscMinted); 
+    }
+
+
+ 
 }
