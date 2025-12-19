@@ -28,6 +28,9 @@ import { DecentralizedStableCoin } from "./DecentralizedStableCoin.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+using SafeERC20 for IERC20;
 
 contract DSCEngine is ReentrancyGuard {
     ////////////// 
@@ -36,9 +39,7 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__MoreThanZero();
     error DSCEngine__NotAllowedToken();
     error DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength();
-    error DSCEngine__TransferFailed();
     error DSCEngine__HealthFactorIsBroken(uint256 healthFactor);
-    error DSCEngine__MintFailed();
     error DSCEngine__HealthFactorOk();
     error DSCEngine__ExcessDebtToCover();
     error DSCEngine__HealthFactorNotImproved();
@@ -56,7 +57,7 @@ contract DSCEngine is ReentrancyGuard {
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant LIQUIDATION_PRECISION = 100;
-    uint256 private constant MIN_HEALTH_FACTOR = 1;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
     uint256 private constant LIQUIDATION_BONUS = 10;
     mapping(address token => address priceFeed) private s_priceFeeds;
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
@@ -136,8 +137,8 @@ contract DSCEngine is ReentrancyGuard {
         moreThanZero(amountDscToMint)
         isAllowedToken(tokenCollateralAddress)
         nonReentrant{
-            depositCollateral(tokenCollateralAddress, amountCollateral);
-            mintDsc(amountDscToMint);
+            _depositCollateral(tokenCollateralAddress, amountCollateral);
+            _mintDsc(amountDscToMint);
         }
 
     /*
@@ -152,13 +153,16 @@ contract DSCEngine is ReentrancyGuard {
         moreThanZero(amountCollateral)
         isAllowedToken(tokenCollateralAddress)
         nonReentrant{
+            _depositCollateral(tokenCollateralAddress, amountCollateral);
+    }
 
+    function _depositCollateral(
+        address tokenCollateralAddress, 
+        uint256 amountCollateral) 
+        private {
         s_collateralDeposited[msg.sender][tokenCollateralAddress] += amountCollateral;
         emit CollateralDeposited(msg.sender, tokenCollateralAddress, amountCollateral);
-        bool success = IERC20(tokenCollateralAddress).transferFrom(msg.sender, address(this), amountCollateral);
-        if (!success) {
-            revert DSCEngine__TransferFailed();
-        }
+        IERC20(tokenCollateralAddress).safeTransferFrom(msg.sender, address(this), amountCollateral);
     }
 
     /*
@@ -170,9 +174,14 @@ contract DSCEngine is ReentrancyGuard {
     function redeemCollateralForDSC(
         address tokenCollateralAddress,
         uint256 amountCollateral,
-        uint256 amountDSCToBurn) external {
-            burnDSC(amountDSCToBurn);
-            redeemCollateral(tokenCollateralAddress, amountCollateral);
+        uint256 amountDSCToBurn) 
+        external 
+        moreThanZero(amountCollateral)
+        moreThanZero(amountDSCToBurn)
+        nonReentrant{
+            _burnDSC(msg.sender, msg.sender, amountDSCToBurn);
+            _redeemCollateral(msg.sender, msg.sender, tokenCollateralAddress, amountCollateral);
+            _revertIfHealthFactorIsBroken(msg.sender);
         }
 
     function redeemCollateral(
@@ -189,14 +198,16 @@ contract DSCEngine is ReentrancyGuard {
     /*
     * @param amountDscToMint The amount of DSC to mint
     */
-    function mintDsc(uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
-        
+    function mintDsc(uint256 amountDscToMint) public 
+        moreThanZero(amountDscToMint)
+        nonReentrant{
+            _mintDsc(amountDscToMint);
+    }
+
+    function _mintDsc(uint256 amountDscToMint) private {
         s_DSCMinted[msg.sender] += amountDscToMint;
         _revertIfHealthFactorIsBroken(msg.sender);
-        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
-        if (!minted) {
-            revert DSCEngine__MintFailed();
-        }
+        i_dsc.mint(msg.sender, amountDscToMint);
     }
 
     function burnDSC(uint256 amountDscToBurn) public moreThanZero(amountDscToBurn) nonReentrant {
@@ -213,7 +224,10 @@ contract DSCEngine is ReentrancyGuard {
     function liquidate(
         address user,
         address tokenCollateralAddress,
-        uint256 debtToCover) external moreThanZero(debtToCover) nonReentrant{
+        uint256 debtToCover) 
+        external 
+        moreThanZero(debtToCover) 
+        nonReentrant{
             uint256 startingUserHealthFactor = _healthFactor(user);
             if (startingUserHealthFactor >= MIN_HEALTH_FACTOR) {
                 revert DSCEngine__HealthFactorOk();
@@ -246,10 +260,7 @@ contract DSCEngine is ReentrancyGuard {
     function _burnDSC(address onBehalfOf, address dscFrom, uint256 amountDscToBurn) private {
         s_DSCMinted[onBehalfOf] -= amountDscToBurn;
 
-        bool success = i_dsc.transferFrom(dscFrom, address(this), amountDscToBurn);
-        if (!success) {
-            revert DSCEngine__TransferFailed();
-        }
+        IERC20(address(i_dsc)).safeTransferFrom(dscFrom, address(this), amountDscToBurn);
         i_dsc.burn(amountDscToBurn);
     }
 
@@ -279,10 +290,7 @@ contract DSCEngine is ReentrancyGuard {
     function _redeemCollateral(address from, address to, address tokenCollateralAddress, uint256 amountCollateral) internal {
         s_collateralDeposited[from][tokenCollateralAddress] -= amountCollateral;
         emit CollateralRedeemed(from, to, tokenCollateralAddress, amountCollateral);
-        bool success = IERC20(tokenCollateralAddress).transfer(to, amountCollateral);
-        if (!success) {
-            revert DSCEngine__TransferFailed();
-        }
+        IERC20(tokenCollateralAddress).safeTransfer(to, amountCollateral);
     }
 
     ////////////// 
